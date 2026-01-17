@@ -1,14 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
+import { Slider } from '@/components/ui/slider';
 import Icon from '@/components/ui/icon';
 import { toast } from 'sonner';
+import { audioManager } from '@/utils/audioManager';
 
-// Типы фигур
+const API_URL = 'https://functions.poehali.dev/3320fc5f-35cf-42ce-b59d-7b93bcaefbce';
+
 type PieceType = 'king' | 'queen' | 'rook' | 'bishop' | 'knight' | 'pawn' | 'mage' | 'dragon' | 'necromancer' | 'archangel' | 'warlock';
 type PieceColor = 'white' | 'black';
 
@@ -37,7 +41,16 @@ interface Achievement {
   requirement?: number;
 }
 
-// Эмодзи для фигур
+interface PlayerProfile {
+  id?: number;
+  username: string;
+  rating: number;
+  totalGames: number;
+  wins: number;
+  losses: number;
+  draws: number;
+}
+
 const pieceEmojis: Record<PieceType, { white: string; black: string }> = {
   king: { white: '♔', black: '♚' },
   queen: { white: '♕', black: '♛' },
@@ -57,15 +70,19 @@ const Index = () => {
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [gameMode, setGameMode] = useState<'local' | 'bot' | 'online'>('local');
   const [botDifficulty, setBotDifficulty] = useState(1);
   const [board, setBoard] = useState<(Piece | null)[][]>([]);
   const [selectedPos, setSelectedPos] = useState<Position | null>(null);
   const [currentTurn, setCurrentTurn] = useState<PieceColor>('white');
   const [captures, setCaptures] = useState<{ white: Piece[]; black: Piece[] }>({ white: [], black: [] });
+  const [moveHistory, setMoveHistory] = useState<string[]>([]);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [leaderboard, setLeaderboard] = useState<PlayerProfile[]>([]);
+  const [animatingPiece, setAnimatingPiece] = useState<Position | null>(null);
   
-  // Профиль игрока
-  const [playerStats, setPlayerStats] = useState({
+  const [playerStats, setPlayerStats] = useState<PlayerProfile>({
     username: 'Игрок',
     rating: 1200,
     totalGames: 0,
@@ -74,7 +91,6 @@ const Index = () => {
     draws: 0,
   });
 
-  // Достижения
   const [achievements, setAchievements] = useState<Achievement[]>([
     { id: 1, name: 'Первая победа', description: 'Одержите первую победу', icon: '🏆', unlocked: false, progress: 0, requirement: 1 },
     { id: 2, name: 'Покоритель новичков', description: 'Победите бота 1-3 уровня 10 раз', icon: '🎯', unlocked: false, progress: 0, requirement: 10 },
@@ -88,12 +104,129 @@ const Index = () => {
     { id: 10, name: 'Легенда', description: 'Достигните рейтинга 2000', icon: '⭐', unlocked: false, progress: 1200, requirement: 2000 },
   ]);
 
-  // Инициализация доски 16x16
+  useEffect(() => {
+    loadPlayerProfile();
+    loadLeaderboard();
+  }, []);
+
+  const loadPlayerProfile = async () => {
+    try {
+      const response = await fetch(`${API_URL}?action=profile&username=${playerStats.username}`);
+      const data = await response.json();
+      setPlayerStats({
+        id: data.id,
+        username: data.username,
+        rating: data.rating,
+        totalGames: data.totalGames,
+        wins: data.wins,
+        losses: data.losses,
+        draws: data.draws,
+      });
+    } catch (error) {
+      console.error('Failed to load profile:', error);
+    }
+  };
+
+  const loadLeaderboard = async () => {
+    try {
+      const response = await fetch(`${API_URL}?action=leaderboard&limit=10`);
+      const data = await response.json();
+      setLeaderboard(data);
+    } catch (error) {
+      console.error('Failed to load leaderboard:', error);
+    }
+  };
+
+  const saveGame = async (winner: PieceColor | 'draw') => {
+    try {
+      await fetch(`${API_URL}?action=game`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          whitePlayerId: playerStats.id,
+          gameMode,
+          botDifficulty: gameMode === 'bot' ? botDifficulty : null,
+          winner,
+          moves: moveHistory,
+          boardState: board,
+        }),
+      });
+
+      const winValue = winner === 'white' ? 1 : 0;
+      const lossValue = winner === 'black' ? 1 : 0;
+      const drawValue = winner === 'draw' ? 1 : 0;
+      const ratingChange = winner === 'white' ? 15 : winner === 'black' ? -10 : 0;
+
+      const response = await fetch(`${API_URL}?action=stats`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: playerStats.id,
+          wins: winValue,
+          losses: lossValue,
+          draws: drawValue,
+          ratingChange,
+        }),
+      });
+
+      const updatedStats = await response.json();
+      setPlayerStats(prev => ({
+        ...prev,
+        ...updatedStats,
+      }));
+
+      if (winner === 'white') {
+        checkAchievements();
+        if (soundEnabled) audioManager.playSound('victory');
+      } else if (winner === 'black') {
+        if (soundEnabled) audioManager.playSound('defeat');
+      }
+    } catch (error) {
+      console.error('Failed to save game:', error);
+    }
+  };
+
+  const checkAchievements = () => {
+    if (playerStats.wins === 1 && !achievements[0].unlocked) {
+      unlockAchievement(1);
+    }
+    if (playerStats.totalGames >= 100 && !achievements[8].unlocked) {
+      unlockAchievement(9);
+    }
+  };
+
+  const unlockAchievement = async (achievementId: number) => {
+    try {
+      await fetch(`${API_URL}?action=achievement`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: playerStats.id,
+          achievementId,
+        }),
+      });
+
+      setAchievements(prev =>
+        prev.map(ach =>
+          ach.id === achievementId ? { ...ach, unlocked: true } : ach
+        )
+      );
+      
+      const achievement = achievements.find(a => a.id === achievementId);
+      if (achievement) {
+        toast.success(`🏆 Достижение разблокировано: ${achievement.name}!`, {
+          description: achievement.description,
+        });
+        if (soundEnabled) audioManager.playSound('achievement');
+      }
+    } catch (error) {
+      console.error('Failed to unlock achievement:', error);
+    }
+  };
+
   const initializeBoard = () => {
     const newBoard: (Piece | null)[][] = Array(16).fill(null).map(() => Array(16).fill(null));
     
-    // Белые фигуры (нижние 2 ряда)
-    // Первый ряд - основные фигуры
     newBoard[15][0] = { type: 'rook', color: 'white' };
     newBoard[15][1] = { type: 'knight', color: 'white' };
     newBoard[15][2] = { type: 'bishop', color: 'white' };
@@ -111,12 +244,10 @@ const Index = () => {
     newBoard[15][14] = { type: 'knight', color: 'white' };
     newBoard[15][15] = { type: 'rook', color: 'white' };
     
-    // Пешки
     for (let col = 0; col < 16; col++) {
       newBoard[14][col] = { type: 'pawn', color: 'white' };
     }
 
-    // Чёрные фигуры (верхние 2 ряда)
     newBoard[0][0] = { type: 'rook', color: 'black' };
     newBoard[0][1] = { type: 'knight', color: 'black' };
     newBoard[0][2] = { type: 'bishop', color: 'black' };
@@ -139,6 +270,7 @@ const Index = () => {
     }
 
     setBoard(newBoard);
+    setMoveHistory([]);
   };
 
   useEffect(() => {
@@ -147,7 +279,6 @@ const Index = () => {
     }
   }, [gameStarted]);
 
-  // Проверка возможности хода
   const isValidMove = (from: Position, to: Position): boolean => {
     const piece = board[from.row][from.col];
     if (!piece || piece.color !== currentTurn) return false;
@@ -185,29 +316,22 @@ const Index = () => {
         return rowDiff <= 1 && colDiff <= 1;
 
       case 'mage':
-        // Маг: как слон + телепортация (может прыгнуть на любую клетку в радиусе 3)
         if (rowDiff === colDiff && isPathClear(from, to)) return true;
         if (piece.canTeleport && rowDiff <= 3 && colDiff <= 3) {
-          toast.success('Маг использует телепортацию! ✨');
           return true;
         }
         return false;
 
       case 'dragon':
-        // Дракон: как ферзь + может перепрыгивать через фигуры
-        if ((to.row === from.row || to.col === from.col) || (rowDiff === colDiff)) return true;
-        return false;
+        return (to.row === from.row || to.col === from.col) || (rowDiff === colDiff);
 
       case 'necromancer':
-        // Некромант: как слон, может воскрешать фигуры
         return rowDiff === colDiff && isPathClear(from, to);
 
       case 'archangel':
-        // Архангел: как ферзь + может лечить союзников (защита от взятия на 1 ход)
         return ((to.row === from.row || to.col === from.col) || (rowDiff === colDiff)) && isPathClear(from, to);
 
       case 'warlock':
-        // Чернокнижник: как ладья + может проклинать врагов (блокировка хода)
         return (to.row === from.row || to.col === from.col) && isPathClear(from, to);
 
       default:
@@ -250,6 +374,9 @@ const Index = () => {
     const piece = newBoard[from.row][from.col];
     const capturedPiece = newBoard[to.row][to.col];
 
+    setAnimatingPiece(from);
+    setTimeout(() => setAnimatingPiece(null), 300);
+
     if (capturedPiece) {
       setCaptures(prev => ({
         ...prev,
@@ -257,6 +384,18 @@ const Index = () => {
       }));
       
       toast.info(`${pieceEmojis[piece!.type][currentTurn]} взял ${pieceEmojis[capturedPiece.type][capturedPiece.color]}!`);
+      if (soundEnabled) audioManager.playSound('capture');
+    } else {
+      if (soundEnabled) audioManager.playSound('move');
+    }
+
+    if (piece?.type === 'mage' && (Math.abs(to.row - from.row) > 1 || Math.abs(to.col - from.col) > 1)) {
+      toast.success('✨ Маг использует телепортацию!');
+      if (soundEnabled) audioManager.playSound('teleport');
+    }
+
+    if (piece?.type === 'dragon') {
+      if (soundEnabled) audioManager.playSound('dragon');
     }
 
     newBoard[to.row][to.col] = piece;
@@ -265,12 +404,40 @@ const Index = () => {
     if (piece) piece.hasMoved = true;
 
     setBoard(newBoard);
+    setMoveHistory(prev => [...prev, `${pieceEmojis[piece!.type][currentTurn]} ${from.row},${from.col} → ${to.row},${to.col}`]);
     setCurrentTurn(currentTurn === 'white' ? 'black' : 'white');
 
-    // Ход бота
     if (gameMode === 'bot' && currentTurn === 'white') {
       setTimeout(() => makeBotMove(newBoard), 500);
     }
+  };
+
+  const evaluatePosition = (board: (Piece | null)[][], color: PieceColor): number => {
+    const pieceValues: Record<PieceType, number> = {
+      pawn: 1,
+      knight: 3,
+      bishop: 3,
+      rook: 5,
+      queen: 9,
+      king: 100,
+      mage: 7,
+      dragon: 8,
+      necromancer: 6,
+      archangel: 7,
+      warlock: 6,
+    };
+
+    let score = 0;
+    board.forEach(row => {
+      row.forEach(piece => {
+        if (piece) {
+          const value = pieceValues[piece.type];
+          score += piece.color === color ? value : -value;
+        }
+      });
+    });
+
+    return score;
   };
 
   const makeBotMove = (currentBoard: (Piece | null)[][]) => {
@@ -283,20 +450,64 @@ const Index = () => {
       });
     });
 
-    // Простая логика бота - случайный ход
-    const attempts = botPieces.length * 20;
-    for (let i = 0; i < attempts; i++) {
-      const fromPos = botPieces[Math.floor(Math.random() * botPieces.length)];
-      const toRow = Math.floor(Math.random() * 16);
-      const toCol = Math.floor(Math.random() * 16);
-      
-      if (isValidMove(fromPos, { row: toRow, col: toCol })) {
-        setSelectedPos(fromPos);
-        setTimeout(() => {
-          makeMove(fromPos, { row: toRow, col: toCol });
-        }, 300);
-        return;
+    let bestMove: { from: Position; to: Position; score: number } | null = null;
+
+    if (botDifficulty >= 8) {
+      botPieces.forEach(fromPos => {
+        for (let row = 0; row < 16; row++) {
+          for (let col = 0; col < 16; col++) {
+            if (isValidMove(fromPos, { row, col })) {
+              const testBoard = currentBoard.map(r => [...r]);
+              const piece = testBoard[fromPos.row][fromPos.col];
+              testBoard[row][col] = piece;
+              testBoard[fromPos.row][fromPos.col] = null;
+              
+              const score = evaluatePosition(testBoard, 'black');
+              
+              if (!bestMove || score > bestMove.score) {
+                bestMove = { from: fromPos, to: { row, col }, score };
+              }
+            }
+          }
+        }
+      });
+    } else if (botDifficulty >= 4) {
+      const captures: { from: Position; to: Position }[] = [];
+      botPieces.forEach(fromPos => {
+        for (let row = 0; row < 16; row++) {
+          for (let col = 0; col < 16; col++) {
+            if (isValidMove(fromPos, { row, col }) && currentBoard[row][col]) {
+              captures.push({ from: fromPos, to: { row, col } });
+            }
+          }
+        }
+      });
+
+      if (captures.length > 0) {
+        const move = captures[Math.floor(Math.random() * captures.length)];
+        bestMove = { ...move, score: 0 };
       }
+    }
+
+    if (!bestMove) {
+      const attempts = botPieces.length * 20;
+      for (let i = 0; i < attempts; i++) {
+        const fromPos = botPieces[Math.floor(Math.random() * botPieces.length)];
+        const toRow = Math.floor(Math.random() * 16);
+        const toCol = Math.floor(Math.random() * 16);
+        
+        if (isValidMove(fromPos, { row: toRow, col: toCol })) {
+          bestMove = { from: fromPos, to: { row: toRow, col: toCol }, score: 0 };
+          break;
+        }
+      }
+    }
+
+    if (bestMove) {
+      setSelectedPos(bestMove.from);
+      setTimeout(() => {
+        makeMove(bestMove.from, bestMove.to);
+      }, 300);
     }
   };
 
@@ -309,24 +520,27 @@ const Index = () => {
     toast.success(`Игра начата! Режим: ${mode === 'local' ? 'Локально' : mode === 'bot' ? `Бот (уровень ${difficulty})` : 'Онлайн'}`);
   };
 
-  const unlockAchievement = (achievementId: number) => {
-    setAchievements(prev =>
-      prev.map(ach =>
-        ach.id === achievementId ? { ...ach, unlocked: true } : ach
-      )
-    );
-    const achievement = achievements.find(a => a.id === achievementId);
-    if (achievement) {
-      toast.success(`🏆 Достижение разблокировано: ${achievement.name}!`, {
-        description: achievement.description,
-      });
-    }
-  };
-
   if (!gameStarted) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-[#1A1F2C] via-[#2D1B4E] to-[#1A1F2C] flex items-center justify-center p-4">
-        <div className="text-center space-y-8 animate-fade-in">
+      <div className="min-h-screen bg-gradient-to-br from-[#1A1F2C] via-[#2D1B4E] to-[#1A1F2C] flex items-center justify-center p-4 relative overflow-hidden">
+        <div className="absolute inset-0 opacity-20">
+          {[...Array(50)].map((_, i) => (
+            <div
+              key={i}
+              className="absolute rounded-full bg-[#9b87f5] animate-pulse"
+              style={{
+                width: Math.random() * 4 + 'px',
+                height: Math.random() * 4 + 'px',
+                left: Math.random() * 100 + '%',
+                top: Math.random() * 100 + '%',
+                animationDelay: Math.random() * 2 + 's',
+                animationDuration: (Math.random() * 3 + 2) + 's',
+              }}
+            />
+          ))}
+        </div>
+
+        <div className="text-center space-y-8 animate-fade-in relative z-10">
           <div className="space-y-4">
             <h1 className="text-7xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-[#9b87f5] via-[#D6BCFA] to-[#F97316] animate-pulse">
               ⚔️ MAGICAL CHESS ⚔️
@@ -344,7 +558,7 @@ const Index = () => {
               НАЧАТЬ ИГРУ
             </Button>
 
-            <div className="flex gap-4 justify-center">
+            <div className="flex gap-4 justify-center flex-wrap">
               <Button
                 variant="outline"
                 size="lg"
@@ -353,6 +567,15 @@ const Index = () => {
               >
                 <Icon name="User" className="mr-2" size={20} />
                 Профиль
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={() => setShowLeaderboard(true)}
+                className="border-[#9b87f5] text-[#D6BCFA] hover:bg-[#9b87f5]/20"
+              >
+                <Icon name="Trophy" className="mr-2" size={20} />
+                Лидеры
               </Button>
               <Button
                 variant="outline"
@@ -369,16 +592,15 @@ const Index = () => {
           <div className="bg-[#1A1F2C]/50 backdrop-blur-sm p-6 rounded-2xl border border-[#9b87f5]/30 max-w-2xl mx-auto">
             <h3 className="text-2xl font-bold text-[#D6BCFA] mb-4">🧙 Магические фигуры:</h3>
             <div className="grid grid-cols-2 gap-3 text-left text-[#D6BCFA]">
-              <div>✨ <strong>Маг</strong> - телепортация</div>
+              <div>✨ <strong>Маг</strong> - телепортация на 3 клетки</div>
               <div>🐉 <strong>Дракон</strong> - полёт через фигуры</div>
-              <div>💀 <strong>Некромант</strong> - воскрешение</div>
-              <div>👼 <strong>Архангел</strong> - защита</div>
-              <div>🔮 <strong>Чернокнижник</strong> - проклятия</div>
+              <div>💀 <strong>Некромант</strong> - воскрешение фигур</div>
+              <div>👼 <strong>Архангел</strong> - защита союзников</div>
+              <div>🔮 <strong>Чернокнижник</strong> - проклятия врагов</div>
             </div>
           </div>
         </div>
 
-        {/* Диалог выбора режима */}
         <Dialog open={showModeDialog} onOpenChange={setShowModeDialog}>
           <DialogContent className="bg-[#1A1F2C] border-[#9b87f5] text-white max-w-2xl">
             <DialogHeader>
@@ -422,20 +644,20 @@ const Index = () => {
                       variant={botDifficulty === level ? 'default' : 'outline'}
                       className={`${
                         level <= 3
-                          ? 'border-green-500 text-green-500'
+                          ? 'border-green-500 text-green-500 hover:bg-green-500/20'
                           : level <= 7
-                          ? 'border-yellow-500 text-yellow-500'
-                          : 'border-red-500 text-red-500'
+                          ? 'border-yellow-500 text-yellow-500 hover:bg-yellow-500/20'
+                          : 'border-red-500 text-red-500 hover:bg-red-500/20'
                       }`}
                     >
                       {level}
                     </Button>
                   ))}
                 </div>
-                <div className="flex gap-2 text-sm text-[#D6BCFA]">
-                  <Badge variant="outline" className="border-green-500 text-green-500">1-3: Новичок</Badge>
-                  <Badge variant="outline" className="border-yellow-500 text-yellow-500">4-7: Средний</Badge>
-                  <Badge variant="outline" className="border-red-500 text-red-500">8-10: Эксперт</Badge>
+                <div className="flex gap-2 text-sm text-[#D6BCFA] flex-wrap">
+                  <Badge variant="outline" className="border-green-500 text-green-500">1-3: Новичок (случайные ходы)</Badge>
+                  <Badge variant="outline" className="border-yellow-500 text-yellow-500">4-7: Средний (приоритет взятия)</Badge>
+                  <Badge variant="outline" className="border-red-500 text-red-500">8-10: Эксперт (оценка позиции)</Badge>
                 </div>
               </TabsContent>
 
@@ -456,7 +678,6 @@ const Index = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Диалог профиля */}
         <Dialog open={showProfileDialog} onOpenChange={setShowProfileDialog}>
           <DialogContent className="bg-[#1A1F2C] border-[#9b87f5] text-white max-w-4xl max-h-[80vh] overflow-y-auto">
             <DialogHeader>
@@ -467,7 +688,6 @@ const Index = () => {
             </DialogHeader>
 
             <div className="space-y-6">
-              {/* Статистика */}
               <Card className="bg-[#2D1B4E]/50 border-[#9b87f5]/30 p-6">
                 <h3 className="text-2xl font-bold text-[#D6BCFA] mb-4">{playerStats.username}</h3>
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
@@ -494,7 +714,6 @@ const Index = () => {
                 </div>
               </Card>
 
-              {/* Достижения */}
               <div>
                 <h3 className="text-2xl font-bold text-[#D6BCFA] mb-4">
                   🏆 Достижения ({achievements.filter(a => a.unlocked).length}/{achievements.length})
@@ -538,7 +757,41 @@ const Index = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Диалог настроек */}
+        <Dialog open={showLeaderboard} onOpenChange={setShowLeaderboard}>
+          <DialogContent className="bg-[#1A1F2C] border-[#9b87f5] text-white max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="text-3xl text-[#D6BCFA]">
+                <Icon name="Trophy" className="inline mr-2" size={32} />
+                Таблица лидеров
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-2">
+              {leaderboard.map((player, index) => (
+                <Card key={index} className="bg-[#2D1B4E]/50 border-[#9b87f5]/30 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className={`text-2xl font-bold ${
+                        index === 0 ? 'text-[#FFD700]' :
+                        index === 1 ? 'text-[#C0C0C0]' :
+                        index === 2 ? 'text-[#CD7F32]' : 'text-[#D6BCFA]'
+                      }`}>
+                        #{index + 1}
+                      </div>
+                      <div>
+                        <div className="font-bold text-white">{player.username}</div>
+                        <div className="text-sm text-[#D6BCFA]">
+                          Побед: {player.wins} / Игр: {player.totalGames}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-2xl font-bold text-[#F97316]">{player.rating}</div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
           <DialogContent className="bg-[#1A1F2C] border-[#9b87f5] text-white">
             <DialogHeader>
@@ -547,18 +800,25 @@ const Index = () => {
                 Настройки
               </DialogTitle>
             </DialogHeader>
-            <div className="space-y-4">
+            <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <span className="text-[#D6BCFA]">Звуковые эффекты</span>
-                <Button variant="outline" size="sm">Вкл</Button>
+                <Switch
+                  checked={soundEnabled}
+                  onCheckedChange={(checked) => {
+                    setSoundEnabled(checked);
+                    if (checked) audioManager.playSound('move');
+                  }}
+                />
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#D6BCFA]">Графика</span>
-                <Button variant="outline" size="sm">Высокая</Button>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#D6BCFA]">Язык</span>
-                <Button variant="outline" size="sm">Русский</Button>
+              <div className="space-y-2">
+                <span className="text-[#D6BCFA]">Громкость звуков</span>
+                <Slider
+                  defaultValue={[50]}
+                  max={100}
+                  step={1}
+                  onValueChange={(value) => audioManager.setSFXVolume(value[0] / 100)}
+                />
               </div>
             </div>
           </DialogContent>
@@ -569,7 +829,6 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#1A1F2C] via-[#2D1B4E] to-[#1A1F2C] p-4">
-      {/* Верхняя панель */}
       <div className="max-w-7xl mx-auto mb-4 flex justify-between items-center">
         <div className="flex gap-2">
           <Button
@@ -609,19 +868,25 @@ const Index = () => {
       </div>
 
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Захваченные фигуры чёрных */}
         <Card className="bg-[#1A1F2C]/80 border-[#9b87f5]/30 p-4 lg:col-span-1">
           <h3 className="text-lg font-bold text-[#D6BCFA] mb-2">⚫ Захвачено:</h3>
           <div className="flex flex-wrap gap-1">
             {captures.white.map((piece, idx) => (
-              <span key={idx} className="text-2xl">
+              <span key={idx} className="text-2xl animate-scale-in">
                 {pieceEmojis[piece.type][piece.color]}
               </span>
             ))}
           </div>
+          <div className="mt-4">
+            <h4 className="text-sm font-bold text-[#D6BCFA] mb-2">История ходов:</h4>
+            <div className="max-h-40 overflow-y-auto text-xs text-[#D6BCFA] space-y-1">
+              {moveHistory.slice(-10).map((move, idx) => (
+                <div key={idx}>{moveHistory.length - 10 + idx + 1}. {move}</div>
+              ))}
+            </div>
+          </div>
         </Card>
 
-        {/* Игровая доска */}
         <div className="lg:col-span-2">
           <div
             className="grid gap-0 bg-[#2D1B4E] p-2 rounded-xl border-4 border-[#9b87f5] shadow-2xl"
@@ -634,6 +899,7 @@ const Index = () => {
               row.map((piece, colIdx) => {
                 const isLight = (rowIdx + colIdx) % 2 === 0;
                 const isSelected = selectedPos?.row === rowIdx && selectedPos?.col === colIdx;
+                const isAnimating = animatingPiece?.row === rowIdx && animatingPiece?.col === colIdx;
 
                 return (
                   <div
@@ -644,6 +910,7 @@ const Index = () => {
                       transition-all duration-200 hover:scale-105
                       ${isLight ? 'bg-[#D6BCFA]/20' : 'bg-[#1A1F2C]/40'}
                       ${isSelected ? 'ring-4 ring-[#F97316] bg-[#F97316]/30' : ''}
+                      ${isAnimating ? 'animate-pulse' : ''}
                       hover:bg-[#9b87f5]/30
                     `}
                     style={{
@@ -662,12 +929,11 @@ const Index = () => {
           </div>
         </div>
 
-        {/* Захваченные фигуры белых */}
         <Card className="bg-[#1A1F2C]/80 border-[#9b87f5]/30 p-4 lg:col-span-1">
           <h3 className="text-lg font-bold text-[#D6BCFA] mb-2">⚪ Захвачено:</h3>
           <div className="flex flex-wrap gap-1">
             {captures.black.map((piece, idx) => (
-              <span key={idx} className="text-2xl">
+              <span key={idx} className="text-2xl animate-scale-in">
                 {pieceEmojis[piece.type][piece.color]}
               </span>
             ))}

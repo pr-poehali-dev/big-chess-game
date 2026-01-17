@@ -1,0 +1,30 @@
+{
+  "tests": [
+    {
+      "name": "Get player profile",
+      "method": "GET",
+      "path": "/?action=profile&username=TestPlayer",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "username": "TestPlayer",
+        "rating": 1200
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Save game",
+      "method": "POST",
+      "path": "/?action=game",
+      "body": {
+        "whitePlayerId": 1,
+        "gameMode": "bot",
+        "botDifficulty": 5,
+        "winner": "white",
+        "moves": [],
+        "boardState": []
+      },
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    }
+  ]
+}
